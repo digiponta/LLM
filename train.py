@@ -17,6 +17,12 @@
 #
 # Therefore optimizer.step() is intentionally disabled until the model
 # forward path is converted to AutoTensor-compatible operations.
+#
+# v0.1 memory-management note:
+#   The virtual GPU uses a linear allocator. Temporary tensors created by a
+#   forward pass would otherwise consume memory permanently. Trainer records
+#   the end of the persistent model allocation and rewinds temporary virtual
+#   GPU allocations after each step.
 
 from typing import List, Tuple
 
@@ -70,13 +76,49 @@ class Trainer:
             learning_rate=learning_rate,
         )
 
+        # Model parameters have already been allocated at this point.
+        # Everything allocated after this address during forward/loss is
+        # temporary in the current v0.1 execution model.
+        self._temporary_memory_mark = (
+            self.model.runtime.memory.next_address
+        )
+
+    def _release_temporary_gpu_memory(self) -> None:
+        """Rewind virtual GPU allocations created after model construction.
+
+        The v0.1 GPUMemory allocator is intentionally simple and does not yet
+        reuse freed blocks.  A training forward pass creates many temporary
+        Tensor objects, so without this rewind every sample would permanently
+        advance next_address and eventually exhaust the simulated GPU memory.
+
+        Persistent model parameters are all below _temporary_memory_mark and
+        are therefore preserved.
+        """
+
+        memory = self.model.runtime.memory
+        mark = self._temporary_memory_mark
+
+        temporary_addresses = [
+            address
+            for address in memory.allocations
+            if address >= mark
+        ]
+
+        for address in temporary_addresses:
+            del memory.allocations[address]
+
+        memory.next_address = mark
+
     def forward_step(
         self,
         input_ids: List[int],
         target_ids: List[int],
     ) -> float:
-        logits = self.model(input_ids)
-        return self.loss_fn(logits, target_ids)
+        try:
+            logits = self.model(input_ids)
+            return self.loss_fn(logits, target_ids)
+        finally:
+            self._release_temporary_gpu_memory()
 
     def train_step(
         self,
@@ -92,14 +134,19 @@ class Trainer:
 
         self.optimizer.zero_grad()
 
-        logits = self.model(input_ids)
-        loss = self.loss_fn(logits, target_ids)
+        try:
+            logits = self.model(input_ids)
+            loss = self.loss_fn(logits, target_ids)
 
-        # Future end-to-end autograd path:
-        # loss.backward()
-        # self.optimizer.step()
+            # Future end-to-end autograd path:
+            # loss.backward()
+            # self.optimizer.step()
 
-        return loss
+            return loss
+        finally:
+            # The current loss is a Python float, so all tensors allocated by
+            # this forward/loss calculation are temporary and can be discarded.
+            self._release_temporary_gpu_memory()
 
     def train(
         self,
