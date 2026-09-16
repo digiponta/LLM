@@ -12,6 +12,7 @@
 from pathlib import Path
 
 from tokenizer import Tokenizer
+from tensor import TensorRuntime
 from llm import LanguageModel
 from train import Trainer, build_training_samples
 
@@ -26,6 +27,14 @@ CONTEXT_LENGTH = 64
 D_MODEL = 64
 NUM_LAYERS = 2
 HIDDEN_DIM = 256
+
+# The virtual GPU stores float elements in a Python list.  The default
+# TensorRuntime size (1,000,000 elements) is too small for a Japanese
+# character vocabulary and a 64-token context because the LM head alone can
+# require hundreds of thousands of temporary elements.  Use a larger runtime
+# for corpus experiments while Trainer rewinds temporary allocations after
+# every step.
+GPU_MEMORY_SIZE = 8_000_000
 
 EPOCHS = 3
 LEARNING_RATE = 1e-3
@@ -139,6 +148,19 @@ def main():
     )
 
     print()
+    print("Creating virtual GPU runtime...")
+
+    runtime = TensorRuntime(
+        memory_size=GPU_MEMORY_SIZE,
+    )
+
+    print(
+        "Virtual GPU memory:",
+        f"{GPU_MEMORY_SIZE:,}",
+        "float elements",
+    )
+
+    print()
     print("Creating model...")
 
     model = LanguageModel(
@@ -147,10 +169,15 @@ def main():
         num_layers=NUM_LAYERS,
         hidden_dim=HIDDEN_DIM,
         causal=True,
+        runtime=runtime,
         seed=42,
     )
 
     model.info()
+
+    print()
+    print("Persistent GPU memory after model creation:")
+    runtime.memory.info()
 
     trainer = Trainer(
         model=model,
