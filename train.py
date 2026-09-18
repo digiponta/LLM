@@ -24,12 +24,24 @@
 #   the end of the persistent model allocation and rewinds temporary virtual
 #   GPU allocations after each step.
 
+import time
 from typing import List, Tuple
 
 from tokenizer import Tokenizer
 from llm import LanguageModel
 from loss import CrossEntropyLoss, shift_tokens, perplexity
 from optimizer import Adam
+
+
+def _format_duration(seconds: float) -> str:
+    """Format a duration as HH:MM:SS."""
+    if seconds < 0 or seconds == float("inf"):
+        return "--:--:--"
+
+    total_seconds = int(seconds)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 def build_training_samples(
@@ -153,29 +165,74 @@ class Trainer:
         samples: List[Tuple[List[int], List[int]]],
         epochs: int = 10,
         verbose: bool = True,
+        progress_interval: int = 100,
     ) -> List[float]:
+        """Run the training scaffold and display progress with elapsed time/ETA.
+
+        progress_interval controls how often progress is printed for large
+        datasets. The first sample and final sample are always displayed.
+        """
+
         if epochs <= 0:
             raise ValueError("epochs must be greater than 0.")
 
         if len(samples) == 0:
             raise ValueError("samples must not be empty.")
 
+        if progress_interval <= 0:
+            raise ValueError("progress_interval must be greater than 0.")
+
         history = []
+        total_samples = len(samples)
+        training_start = time.perf_counter()
 
         for epoch in range(epochs):
             total_loss = 0.0
+            epoch_start = time.perf_counter()
 
-            for input_ids, target_ids in samples:
+            for sample_index, (input_ids, target_ids) in enumerate(samples, start=1):
                 total_loss += self.train_step(input_ids, target_ids)
 
-            average_loss = total_loss / len(samples)
+                if verbose and (
+                    sample_index == 1
+                    or sample_index % progress_interval == 0
+                    or sample_index == total_samples
+                ):
+                    elapsed = time.perf_counter() - epoch_start
+                    samples_per_second = sample_index / elapsed if elapsed > 0 else 0.0
+                    remaining_samples = total_samples - sample_index
+                    eta = (
+                        remaining_samples / samples_per_second
+                        if samples_per_second > 0
+                        else float("inf")
+                    )
+                    progress = 100.0 * sample_index / total_samples
+                    running_loss = total_loss / sample_index
+
+                    print(
+                        f"\rEpoch {epoch + 1}/{epochs} "
+                        f"| {sample_index:,}/{total_samples:,} "
+                        f"({progress:6.2f}%) "
+                        f"| Elapsed {_format_duration(elapsed)} "
+                        f"| ETA {_format_duration(eta)} "
+                        f"| Loss {running_loss:.6f}",
+                        end="",
+                        flush=True,
+                    )
+
+            average_loss = total_loss / total_samples
             history.append(average_loss)
 
             if verbose:
+                epoch_elapsed = time.perf_counter() - epoch_start
+                total_elapsed = time.perf_counter() - training_start
+                print()
                 print(
-                    f"Epoch {epoch + 1:4d} "
+                    f"Epoch {epoch + 1:4d} completed "
                     f"| Loss {average_loss:.6f} "
-                    f"| Perplexity {perplexity(average_loss):.6f}"
+                    f"| Perplexity {perplexity(average_loss):.6f} "
+                    f"| Epoch time {_format_duration(epoch_elapsed)} "
+                    f"| Total {_format_duration(total_elapsed)}"
                 )
 
         return history
