@@ -25,7 +25,7 @@
 #   GPU allocations after each step.
 
 import time
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 from tokenizer import Tokenizer
 from llm import LanguageModel
@@ -47,14 +47,23 @@ def _format_duration(seconds: float) -> str:
 def build_training_samples(
     token_ids: List[int],
     context_length: int,
+    max_samples: Optional[int] = None,
 ) -> List[Tuple[List[int], List[int]]]:
-    """Create next-token language-model training samples."""
+    """Create next-token language-model training samples.
+
+    When max_samples is specified, sample windows are selected uniformly
+    across the entire corpus instead of taking only the beginning. This keeps
+    corpus-wide coverage while avoiding millions of Python sample objects.
+    """
 
     if context_length <= 0:
         raise ValueError("context_length must be greater than 0.")
 
     if len(token_ids) < 2:
         raise ValueError("At least two tokens are required.")
+
+    if max_samples is not None and max_samples <= 0:
+        raise ValueError("max_samples must be greater than 0.")
 
     samples = []
     maximum_start = len(token_ids) - context_length - 1
@@ -64,7 +73,21 @@ def build_training_samples(
         samples.append((inputs, targets))
         return samples
 
-    for start in range(maximum_start + 1):
+    total_windows = maximum_start + 1
+
+    if max_samples is None or max_samples >= total_windows:
+        start_positions = range(total_windows)
+    elif max_samples == 1:
+        start_positions = [0]
+    else:
+        # Uniformly span the whole corpus, including both the first and
+        # last possible windows. round() avoids a systematic left bias.
+        start_positions = [
+            round(i * maximum_start / (max_samples - 1))
+            for i in range(max_samples)
+        ]
+
+    for start in start_positions:
         window = token_ids[start:start + context_length + 1]
         inputs = window[:-1]
         targets = window[1:]
