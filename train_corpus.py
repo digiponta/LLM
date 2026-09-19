@@ -39,6 +39,11 @@ GPU_MEMORY_SIZE = 8_000_000
 EPOCHS = 3
 LEARNING_RATE = 1e-3
 
+# Full Wikipedia-derived corpora can produce millions of overlapping windows.
+# v0.1 is a Python virtual-GPU experiment, so cap the number of samples while
+# selecting them uniformly over the entire combined corpus.
+MAX_SAMPLES = 10_000
+
 
 def load_text(filename):
     path = Path(filename)
@@ -137,14 +142,26 @@ def main():
     print()
     print("Creating training samples...")
 
+    total_possible_samples = max(
+        1,
+        len(token_ids) - CONTEXT_LENGTH,
+    )
+
     samples = build_training_samples(
         token_ids,
         context_length=CONTEXT_LENGTH,
+        max_samples=MAX_SAMPLES,
     )
 
     print(
-        "Training samples:",
+        "Possible training samples:",
+        f"{total_possible_samples:,}",
+    )
+
+    print(
+        "Training samples used:",
         f"{len(samples):,}",
+        f"(uniformly sampled, max={MAX_SAMPLES:,})",
     )
 
     print()
