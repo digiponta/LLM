@@ -84,6 +84,7 @@ def main():
             input_ids,
             max_new_tokens=MAX_NEW_TOKENS,
             eos_id=tokenizer.eos_id,
+            show_progress=True,
         )
 
         generated_text = tokenizer.decode(
