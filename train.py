@@ -8,12 +8,11 @@
 #   loss.py
 #   optimizer.py
 #
-# v0.2 status:
-#   - Forward pass works.
-#   - Cross entropy loss and analytic dL/dlogits work.
-#   - LM output projection (lm_head) is trainable.
-#   - Adam optimizer updates lm_head weights.
-#   - Transformer/Embedding remain frozen in this first functional v0.2 stage.
+# v0.3 status:
+#   - Cross entropy provides analytic dL/dlogits.
+#   - Manual backward propagation covers lm_head, Transformer blocks,
+#     Attention, FFN, LayerNorm, and Embedding.
+#   - Adam updates the complete model parameter set.
 #
 # v0.1 memory-management note:
 #   The virtual GPU uses a linear allocator. Temporary tensors created by a
@@ -94,7 +93,7 @@ def build_training_samples(
 
 
 class Trainer:
-    """Language-model trainer. v0.2 trains the LM output projection."""
+    """Language-model trainer. v0.3 updates the complete model."""
 
     def __init__(
         self,
@@ -103,11 +102,7 @@ class Trainer:
     ):
         self.model = model
         self.loss_fn = CrossEntropyLoss(reduction="mean")
-        # v0.2 first functional training stage:
-        # train only the output projection while keeping the Transformer
-        # backbone frozen. This proves real parameter updates and checkpoint
-        # round-tripping before full-model autograd is connected.
-        self.trainable_parameters = self.model.lm_head.parameters()
+        self.trainable_parameters = self.model.parameters()
 
         self.optimizer = Adam(
             self.trainable_parameters,
@@ -163,39 +158,25 @@ class Trainer:
         input_ids: List[int],
         target_ids: List[int],
     ) -> float:
-        """Execute one real v0.2 training step.
-
-        v0.2 computes the exact cross-entropy gradient with respect to logits
-        and backpropagates it through the final linear projection:
-
-            logits = hidden @ W
-            dW = hidden.T @ dlogits
-
-        The Transformer/Embedding backbone is intentionally frozen at this
-        stage. Adam then updates W for the LM output head.
-        """
+        """Execute one full-model v0.3 training step."""
 
         self.optimizer.zero_grad()
 
         try:
-            hidden = self.model.hidden_states(input_ids)
-            logits = self.model.lm_head(hidden)
+            logits = self.model(input_ids)
 
             loss, grad_logits = self.loss_fn.forward_and_gradient(
                 logits,
                 target_ids,
             )
 
-            grad_weight = hidden.T @ grad_logits
-            self.model.lm_head.weight.grad = grad_weight
-
+            self.model.backward(grad_logits)
             self.optimizer.step()
 
             return loss
         finally:
-            # Gradient/intermediate tensors are temporary after optimizer.step()
-            # because the updated parameter values live in persistent model
-            # storage below _temporary_memory_mark.
+            # All forward/backward temporaries and gradients are no longer
+            # needed after optimizer.step(); model parameters are persistent.
             self._release_temporary_gpu_memory()
 
     def train(
@@ -383,6 +364,6 @@ if __name__ == "__main__":
     print("Loss history:", history)
     print()
     print(
-        "NOTE: v0.2 updates lm_head with analytic cross-entropy gradients; "
-        "the Transformer/Embedding backbone remains frozen."
+        "NOTE: v0.3 propagates gradients through the full model and "
+        "updates all trainable parameters."
     )
