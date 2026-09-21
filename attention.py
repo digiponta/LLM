@@ -1,6 +1,6 @@
 # attention.py
 #
-# Single-head self-attention.
+# Single-head self-attention with v0.3 backward propagation.
 
 import math
 from typing import List, Optional
@@ -25,44 +25,69 @@ class SelfAttention:
         self.causal = causal
         self.runtime = runtime or get_default_runtime()
 
-        self.q_proj = Linear(
-            d_model, d_model, bias=False, runtime=self.runtime, seed=seed + 1
-        )
-        self.k_proj = Linear(
-            d_model, d_model, bias=False, runtime=self.runtime, seed=seed + 2
-        )
-        self.v_proj = Linear(
-            d_model, d_model, bias=False, runtime=self.runtime, seed=seed + 3
-        )
-        self.out_proj = Linear(
-            d_model, d_model, bias=False, runtime=self.runtime, seed=seed + 4
-        )
+        self.q_proj = Linear(d_model, d_model, bias=False, runtime=self.runtime, seed=seed + 1)
+        self.k_proj = Linear(d_model, d_model, bias=False, runtime=self.runtime, seed=seed + 2)
+        self.v_proj = Linear(d_model, d_model, bias=False, runtime=self.runtime, seed=seed + 3)
+        self.out_proj = Linear(d_model, d_model, bias=False, runtime=self.runtime, seed=seed + 4)
         self.softmax = Softmax()
+
+        self._q = None
+        self._k = None
+        self._v = None
+        self._attention_weights = None
 
     def forward(self, x: Tensor) -> Tensor:
         if x.runtime is not self.runtime:
             raise ValueError("Tensor runtime does not match SelfAttention runtime.")
-        if len(x.shape) != 2:
-            raise ValueError("SelfAttention currently expects a 2-D Tensor.")
-        if x.shape[1] != self.d_model:
-            raise ValueError(
-                f"SelfAttention dimension mismatch: expected {self.d_model}, "
-                f"got {x.shape[1]}"
-            )
+        if len(x.shape) != 2 or x.shape[1] != self.d_model:
+            raise ValueError("SelfAttention input dimension mismatch.")
 
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
+        self._q = self.q_proj(x)
+        self._k = self.k_proj(x)
+        self._v = self.v_proj(x)
 
-        scores = q @ k.T
+        scores = self._q @ self._k.T
         scores = scores / math.sqrt(float(self.d_model))
 
         if self.causal:
             scores = self._apply_causal_mask(scores)
 
-        attention_weights = self.softmax(scores)
-        context = attention_weights @ v
+        self._attention_weights = self.softmax(scores)
+        context = self._attention_weights @ self._v
         return self.out_proj(context)
+
+    def backward(self, grad_output: Tensor) -> Tensor:
+        if any(value is None for value in (
+            self._q, self._k, self._v, self._attention_weights
+        )):
+            raise RuntimeError("SelfAttention.backward() called before forward().")
+
+        grad_context = self.out_proj.backward(grad_output)
+
+        grad_attention = grad_context @ self._v.T
+        grad_v_from_context = self._attention_weights.T @ grad_context
+
+        grad_scores = self.softmax.backward(grad_attention)
+
+        if self.causal:
+            rows, cols = grad_scores.shape
+            for row in range(rows):
+                for col in range(cols):
+                    if col > row:
+                        self.runtime.memory.write_scalar(
+                            grad_scores.address + row * cols + col,
+                            0.0,
+                        )
+
+        scale = 1.0 / math.sqrt(float(self.d_model))
+        grad_q = (grad_scores @ self._k) * scale
+        grad_k = (grad_scores.T @ self._q) * scale
+
+        grad_x_q = self.q_proj.backward(grad_q)
+        grad_x_k = self.k_proj.backward(grad_k)
+        grad_x_v = self.v_proj.backward(grad_v_from_context)
+
+        return (grad_x_q + grad_x_k) + grad_x_v
 
     def __call__(self, x: Tensor) -> Tensor:
         return self.forward(x)
@@ -74,9 +99,6 @@ class SelfAttention:
         return result
 
     def _apply_causal_mask(self, scores: Tensor) -> Tensor:
-        if len(scores.shape) != 2:
-            raise ValueError("Causal mask requires 2-D scores.")
-
         rows, cols = scores.shape
         if rows != cols:
             raise ValueError("Causal attention score matrix must be square.")
@@ -99,13 +121,6 @@ class SelfAttention:
             scores = self._apply_causal_mask(scores)
         return self.softmax(scores)
 
-    def info(self) -> None:
-        print("Self Attention")
-        print("==============")
-        print(f"d_model    : {self.d_model}")
-        print(f"Causal     : {self.causal}")
-        print(f"Parameters : {len(self.parameters())}")
-
 
 if __name__ == "__main__":
     x = Tensor([
@@ -114,5 +129,8 @@ if __name__ == "__main__":
         [0.0, 0.0, 1.0, 0.0],
     ])
     attention = SelfAttention(4, runtime=x.runtime, seed=42)
-    print(attention(x))
-    attention.info()
+    y = attention(x)
+    dy = Tensor.ones(y.shape, runtime=x.runtime)
+    dx = attention.backward(dy)
+    print("Y:", y)
+    print("dX:", dx)
