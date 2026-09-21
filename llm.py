@@ -2,8 +2,10 @@
 #
 # Minimal Transformer language model.
 
+import json
 import math
 import time
+from pathlib import Path
 from typing import List, Optional
 
 from tensor import Tensor, TensorRuntime, get_default_runtime
@@ -63,14 +65,18 @@ class LanguageModel:
         )
         self.softmax = Softmax()
 
-    def forward(self, token_ids: List[int]) -> Tensor:
+    def hidden_states(self, token_ids: List[int]) -> Tensor:
+        """Return Transformer hidden states before the LM output projection."""
         if not isinstance(token_ids, list):
             raise TypeError("token_ids must be a list.")
         if len(token_ids) == 0:
             raise ValueError("token_ids must not be empty.")
 
         x = self.embedding(token_ids)
-        x = self.transformer(x)
+        return self.transformer(x)
+
+    def forward(self, token_ids: List[int]) -> Tensor:
+        x = self.hidden_states(token_ids)
         return self.lm_head(x)
 
     def __call__(self, token_ids: List[int]) -> Tensor:
@@ -189,6 +195,94 @@ class LanguageModel:
             print()
 
         return generated
+
+    def save(self, filename: str) -> None:
+        """Save model configuration and all parameter values as JSON."""
+        path = Path(filename)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        parameters = []
+        for index, parameter in enumerate(self.parameters()):
+            parameters.append(
+                {
+                    "index": index,
+                    "name": parameter.name,
+                    "shape": list(parameter.shape),
+                    "values": parameter.tensor.flat(),
+                }
+            )
+
+        data = {
+            "format": "homemade-llm-v0.2",
+            "config": {
+                "vocab_size": self.vocab_size,
+                "d_model": self.d_model,
+                "num_layers": self.num_layers,
+                "hidden_dim": self.hidden_dim,
+                "causal": self.causal,
+            },
+            "parameters": parameters,
+        }
+
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump(data, file, ensure_ascii=False)
+
+    @classmethod
+    def load(
+        cls,
+        filename: str,
+        runtime: Optional[TensorRuntime] = None,
+    ):
+        """Load a model checkpoint created by save()."""
+        with open(filename, "r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        config = data["config"]
+
+        model = cls(
+            vocab_size=int(config["vocab_size"]),
+            d_model=int(config["d_model"]),
+            num_layers=int(config["num_layers"]),
+            hidden_dim=int(config["hidden_dim"]),
+            causal=bool(config.get("causal", True)),
+            runtime=runtime,
+            seed=0,
+        )
+
+        parameters = model.parameters()
+        saved_parameters = data["parameters"]
+
+        if len(parameters) != len(saved_parameters):
+            raise ValueError(
+                "Checkpoint parameter count mismatch: "
+                f"model={len(parameters)}, checkpoint={len(saved_parameters)}"
+            )
+
+        for parameter, saved in zip(parameters, saved_parameters):
+            saved_shape = tuple(int(x) for x in saved["shape"])
+
+            if parameter.shape != saved_shape:
+                raise ValueError(
+                    "Checkpoint parameter shape mismatch: "
+                    f"{parameter.shape} != {saved_shape}"
+                )
+
+            values = [
+                float(value)
+                for value in saved["values"]
+            ]
+
+            if len(values) != parameter.size:
+                raise ValueError(
+                    "Checkpoint parameter size mismatch."
+                )
+
+            parameter.runtime.memory.write(
+                parameter.address,
+                values,
+            )
+
+        return model
 
     def info(self) -> None:
         parameters = self.parameters()
