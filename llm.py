@@ -4,6 +4,7 @@
 
 import json
 import math
+import random
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -64,6 +65,7 @@ class LanguageModel:
             seed=seed + 1000,
         )
         self.softmax = Softmax()
+        self.rng = random.Random(seed + 2000)
 
     def hidden_states(self, token_ids: List[int]) -> Tensor:
         """Return Transformer hidden states before the LM output projection."""
@@ -81,6 +83,12 @@ class LanguageModel:
 
     def __call__(self, token_ids: List[int]) -> Tensor:
         return self.forward(token_ids)
+
+    def backward(self, grad_logits: Tensor) -> None:
+        """Backpropagate from logits through the complete language model."""
+        grad_hidden = self.lm_head.backward(grad_logits)
+        grad_embedding = self.transformer.backward(grad_hidden)
+        self.embedding.backward(grad_embedding)
 
     def parameters(self) -> List[Parameter]:
         """Return every trainable Parameter in optimizer-ready order."""
@@ -115,11 +123,59 @@ class LanguageModel:
 
     def next_token(self, token_ids: List[int]) -> int:
         logits = self.last_logits(token_ids)
-        best_index = 0
-        for index in range(1, len(logits)):
-            if logits[index] > logits[best_index]:
-                best_index = index
-        return best_index
+        return max(range(len(logits)), key=lambda index: logits[index])
+
+    def sample_next_token(
+        self,
+        token_ids: List[int],
+        temperature: float = 0.8,
+        top_k: Optional[int] = 40,
+        repetition_penalty: float = 1.1,
+    ) -> int:
+        """Sample the next token with temperature/top-k/repetition penalty."""
+        logits = self.last_logits(token_ids)
+
+        if repetition_penalty <= 0.0:
+            raise ValueError("repetition_penalty must be > 0.")
+
+        if repetition_penalty != 1.0:
+            seen = set(token_ids)
+            for token_id in seen:
+                if 0 <= token_id < len(logits):
+                    if logits[token_id] >= 0.0:
+                        logits[token_id] /= repetition_penalty
+                    else:
+                        logits[token_id] *= repetition_penalty
+
+        if temperature <= 0.0:
+            return max(range(len(logits)), key=lambda index: logits[index])
+
+        scaled = [value / temperature for value in logits]
+
+        if top_k is not None and top_k > 0 and top_k < len(scaled):
+            candidates = sorted(
+                range(len(scaled)),
+                key=lambda index: scaled[index],
+                reverse=True,
+            )[:top_k]
+        else:
+            candidates = list(range(len(scaled)))
+
+        max_logit = max(scaled[index] for index in candidates)
+        weights = [
+            math.exp(scaled[index] - max_logit)
+            for index in candidates
+        ]
+        total = sum(weights)
+
+        threshold = self.rng.random() * total
+        cumulative = 0.0
+        for token_id, weight in zip(candidates, weights):
+            cumulative += weight
+            if cumulative >= threshold:
+                return token_id
+
+        return candidates[-1]
 
     def generate(
         self,
@@ -127,6 +183,9 @@ class LanguageModel:
         max_new_tokens: int = 10,
         eos_id: Optional[int] = None,
         show_progress: bool = False,
+        temperature: float = 0.8,
+        top_k: Optional[int] = 40,
+        repetition_penalty: float = 1.1,
     ) -> List[int]:
         if max_new_tokens < 0:
             raise ValueError("max_new_tokens must be >= 0.")
@@ -144,7 +203,12 @@ class LanguageModel:
 
         for step in range(1, max_new_tokens + 1):
             try:
-                next_id = self.next_token(generated)
+                next_id = self.sample_next_token(
+                    generated,
+                    temperature=temperature,
+                    top_k=top_k,
+                    repetition_penalty=repetition_penalty,
+                )
             finally:
                 temporary_addresses = [
                     address
