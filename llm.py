@@ -3,6 +3,7 @@
 # Minimal Transformer language model.
 
 import math
+import time
 from typing import List, Optional
 
 from tensor import Tensor, TensorRuntime, get_default_runtime
@@ -119,6 +120,7 @@ class LanguageModel:
         token_ids: List[int],
         max_new_tokens: int = 10,
         eos_id: Optional[int] = None,
+        show_progress: bool = False,
     ) -> List[int]:
         if max_new_tokens < 0:
             raise ValueError("max_new_tokens must be >= 0.")
@@ -132,7 +134,9 @@ class LanguageModel:
         memory = self.runtime.memory
         temporary_mark = memory.next_address
 
-        for _ in range(max_new_tokens):
+        start_time = time.perf_counter()
+
+        for step in range(1, max_new_tokens + 1):
             try:
                 next_id = self.next_token(generated)
             finally:
@@ -149,8 +153,40 @@ class LanguageModel:
 
             generated.append(next_id)
 
+            if show_progress:
+                elapsed = time.perf_counter() - start_time
+                tokens_per_second = step / elapsed if elapsed > 0 else 0.0
+                remaining = max_new_tokens - step
+                eta = (
+                    remaining / tokens_per_second
+                    if tokens_per_second > 0
+                    else float("inf")
+                )
+
+                def format_duration(seconds: float) -> str:
+                    if seconds < 0 or seconds == float("inf"):
+                        return "--:--:--"
+                    total_seconds = int(seconds)
+                    hours, remainder = divmod(total_seconds, 3600)
+                    minutes, secs = divmod(remainder, 60)
+                    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+                progress = 100.0 * step / max_new_tokens if max_new_tokens else 100.0
+
+                print(
+                    f"\rGenerating: {step:,}/{max_new_tokens:,} "
+                    f"({progress:6.2f}%) "
+                    f"| Elapsed {format_duration(elapsed)} "
+                    f"| ETA {format_duration(eta)}",
+                    end="",
+                    flush=True,
+                )
+
             if eos_id is not None and next_id == eos_id:
                 break
+
+        if show_progress:
+            print()
 
         return generated
 
