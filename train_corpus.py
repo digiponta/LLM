@@ -5,9 +5,9 @@
 #   data/general-ja.txt
 #   data/data-nagato.txt
 #
-# v0.2:
-#   - Performs real optimization of the LM output projection.
-#   - Transformer/Embedding are frozen in this first functional stage.
+# v0.3:
+#   - Trains Embedding, Transformer, Attention, FFN, LayerNorm, and lm_head.
+#   - Uses a deliberately small first run to validate full backpropagation.
 #   - Saves a checkpoint for infer.py.
 
 from pathlib import Path
@@ -22,9 +22,9 @@ GENERAL_FILE = "data/general-ja.txt"
 NAGATO_FILE = "data/data-nagato.txt"
 
 TOKENIZER_FILE = "model/tokenizer.json"
-MODEL_FILE = "model/model-v0.2.json"
+MODEL_FILE = "model/model-v0.3.json"
 
-CONTEXT_LENGTH = 64
+CONTEXT_LENGTH = 32
 
 D_MODEL = 64
 NUM_LAYERS = 2
@@ -38,15 +38,16 @@ HIDDEN_DIM = 256
 # every step.
 GPU_MEMORY_SIZE = 8_000_000
 
-# Keep the first real-learning run deliberately smaller than the v0.1
-# forward-only benchmark. Increase these after confirming that loss changes.
+# Full-model backward propagation is substantially more expensive than v0.2.
+# Start small, confirm loss decreases and checkpoint inference works, then
+# increase MAX_SAMPLES/EPOCHS.
 EPOCHS = 1
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 5e-4
 
 # Full Wikipedia-derived corpora can produce millions of overlapping windows.
 # v0.1 is a Python virtual-GPU experiment, so cap the number of samples while
 # selecting them uniformly over the entire combined corpus.
-MAX_SAMPLES = 1_000
+MAX_SAMPLES = 200
 
 
 def load_text(filename):
@@ -66,7 +67,7 @@ def main():
 
     print()
     print("====================================")
-    print(" Homemade LLM Corpus Training v0.2")
+    print(" Homemade LLM Corpus Training v0.3")
     print("====================================")
     print()
 
@@ -237,8 +238,8 @@ def main():
     print()
     print("NOTE:")
     print(
-        "v0.2 performs real Adam updates on lm_head. "
-        "Transformer/Embedding are frozen in this first functional stage."
+        "v0.3 performs full-model backward propagation and Adam updates "
+        "across Embedding, Transformer, Attention, FFN, LayerNorm, and lm_head."
     )
 
 
