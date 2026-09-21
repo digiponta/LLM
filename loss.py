@@ -11,8 +11,8 @@
 #
 # Notes:
 #   - No NumPy is used.
-#   - Backpropagation is not implemented here yet.
-#   - This module computes scalar loss values.
+#   - Computes scalar cross-entropy loss.
+#   - Provides the analytic gradient with respect to logits for v0.2 training.
 
 import math
 from typing import List
@@ -255,6 +255,110 @@ class CrossEntropyLoss:
             total
             / len(losses)
         )
+
+    # ========================================================
+    # Gradient with respect to logits
+    # ========================================================
+
+    def gradient(
+        self,
+        logits: Tensor,
+        targets: List[int],
+    ) -> Tensor:
+        """Return d(loss)/d(logits).
+
+        For cross entropy with softmax:
+
+            dL/dz = softmax(z) - one_hot(target)
+
+        Mean reduction additionally divides by sequence length.
+        """
+
+        if self.reduction == "none":
+            raise ValueError(
+                "gradient() does not support reduction='none'."
+            )
+
+        if len(logits.shape) != 2:
+            raise ValueError(
+                "CrossEntropyLoss expects 2-D logits."
+            )
+
+        sequence_length, vocab_size = logits.shape
+
+        if len(targets) != sequence_length:
+            raise ValueError(
+                "Target length mismatch: "
+                f"expected {sequence_length}, got {len(targets)}"
+            )
+
+        gradient_values = []
+
+        for position in range(sequence_length):
+            target_id = targets[position]
+
+            if not isinstance(target_id, int):
+                raise TypeError(
+                    "Target token IDs must be integers."
+                )
+
+            if target_id < 0 or target_id >= vocab_size:
+                raise IndexError(
+                    f"Target token ID out of range: {target_id}"
+                )
+
+            row_address = (
+                logits.address
+                + position * vocab_size
+            )
+
+            row = logits.runtime.memory.read(
+                row_address,
+                vocab_size,
+            )
+
+            max_logit = max(row)
+            exp_values = [
+                math.exp(value - max_logit)
+                for value in row
+            ]
+            total = sum(exp_values)
+
+            if total == 0.0:
+                raise ZeroDivisionError(
+                    "Softmax normalization sum is zero."
+                )
+
+            row_gradient = [
+                value / total
+                for value in exp_values
+            ]
+
+            row_gradient[target_id] -= 1.0
+
+            if self.reduction == "mean":
+                scale = 1.0 / sequence_length
+                row_gradient = [
+                    value * scale
+                    for value in row_gradient
+                ]
+
+            gradient_values.append(row_gradient)
+
+        return Tensor(
+            gradient_values,
+            runtime=logits.runtime,
+        )
+
+    def forward_and_gradient(
+        self,
+        logits: Tensor,
+        targets: List[int],
+    ):
+        """Return (loss, dloss_dlogits) for training."""
+        loss = self.forward(logits, targets)
+        gradient = self.gradient(logits, targets)
+        return loss, gradient
 
     # ========================================================
     # Callable Interface
