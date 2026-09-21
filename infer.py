@@ -3,6 +3,7 @@
 # Interactive inference for homemade LLM.
 
 from tokenizer import Tokenizer
+from tensor import TensorRuntime
 from llm import LanguageModel
 
 
@@ -13,6 +14,7 @@ NUM_LAYERS = 2
 HIDDEN_DIM = 256
 
 MAX_NEW_TOKENS = 100
+GPU_MEMORY_SIZE = 8_000_000
 
 
 def main():
@@ -32,12 +34,26 @@ def main():
         tokenizer.vocab_size,
     )
 
+    print()
+    print("Creating virtual GPU runtime...")
+
+    runtime = TensorRuntime(
+        memory_size=GPU_MEMORY_SIZE,
+    )
+
+    print(
+        "Virtual GPU memory:",
+        f"{GPU_MEMORY_SIZE:,}",
+        "float elements",
+    )
+
     model = LanguageModel(
         vocab_size=tokenizer.vocab_size,
         d_model=D_MODEL,
         num_layers=NUM_LAYERS,
         hidden_dim=HIDDEN_DIM,
         causal=True,
+        runtime=runtime,
         seed=42,
     )
 
