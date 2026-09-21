@@ -1,6 +1,6 @@
 # transformer.py
 #
-# Transformer block and stack.
+# Transformer block/stack with v0.3 backward propagation.
 
 from typing import List, Optional
 
@@ -24,8 +24,6 @@ class TransformerBlock:
             raise ValueError("d_model must be greater than 0.")
         if hidden_dim is None:
             hidden_dim = 4 * d_model
-        if hidden_dim <= 0:
-            raise ValueError("hidden_dim must be greater than 0.")
 
         self.d_model = d_model
         self.hidden_dim = hidden_dim
@@ -50,18 +48,27 @@ class TransformerBlock:
     def forward(self, x: Tensor) -> Tensor:
         if x.runtime is not self.runtime:
             raise ValueError("Tensor runtime does not match TransformerBlock runtime.")
-        if len(x.shape) != 2:
-            raise ValueError("TransformerBlock currently expects a 2-D Tensor.")
-        if x.shape[1] != self.d_model:
-            raise ValueError(
-                f"TransformerBlock dimension mismatch: expected {self.d_model}, "
-                f"got {x.shape[1]}"
-            )
+        if len(x.shape) != 2 or x.shape[1] != self.d_model:
+            raise ValueError("TransformerBlock input dimension mismatch.")
 
         attention_output = self.attention(self.norm1(x))
-        x = x + attention_output
-        ffn_output = self.ffn(self.norm2(x))
-        return x + ffn_output
+        residual1 = x + attention_output
+        ffn_output = self.ffn(self.norm2(residual1))
+        return residual1 + ffn_output
+
+    def backward(self, grad_output: Tensor) -> Tensor:
+        # output = residual1 + ffn(norm2(residual1))
+        grad_residual1 = grad_output
+        grad_ffn_input = self.ffn.backward(grad_output)
+        grad_residual1_from_ffn = self.norm2.backward(grad_ffn_input)
+        grad_residual1_total = grad_residual1 + grad_residual1_from_ffn
+
+        # residual1 = x + attention(norm1(x))
+        grad_x_residual = grad_residual1_total
+        grad_attention_input = self.attention.backward(grad_residual1_total)
+        grad_x_attention = self.norm1.backward(grad_attention_input)
+
+        return grad_x_residual + grad_x_attention
 
     def __call__(self, x: Tensor) -> Tensor:
         return self.forward(x)
@@ -73,14 +80,6 @@ class TransformerBlock:
         result.extend(self.norm2.parameters())
         result.extend(self.ffn.parameters())
         return result
-
-    def info(self) -> None:
-        print("Transformer Block")
-        print("=================")
-        print(f"d_model    : {self.d_model}")
-        print(f"hidden_dim : {self.hidden_dim}")
-        print(f"causal     : {self.causal}")
-        print(f"Parameters : {len(self.parameters())}")
 
 
 class Transformer:
@@ -120,16 +119,13 @@ class Transformer:
 
         self.final_norm = (
             LayerNorm(d_model, runtime=self.runtime)
-            if final_norm
-            else None
+            if final_norm else None
         )
 
     def forward(self, x: Tensor) -> Tensor:
         if x.runtime is not self.runtime:
             raise ValueError("Tensor runtime does not match Transformer runtime.")
-        if len(x.shape) != 2:
-            raise ValueError("Transformer expects a 2-D Tensor.")
-        if x.shape[1] != self.d_model:
+        if len(x.shape) != 2 or x.shape[1] != self.d_model:
             raise ValueError("Transformer input dimension mismatch.")
 
         for block in self.blocks:
@@ -137,6 +133,14 @@ class Transformer:
         if self.final_norm is not None:
             x = self.final_norm(x)
         return x
+
+    def backward(self, grad_output: Tensor) -> Tensor:
+        grad = grad_output
+        if self.final_norm is not None:
+            grad = self.final_norm.backward(grad)
+        for block in reversed(self.blocks):
+            grad = block.backward(grad)
+        return grad
 
     def __call__(self, x: Tensor) -> Tensor:
         return self.forward(x)
@@ -149,22 +153,15 @@ class Transformer:
             result.extend(self.final_norm.parameters())
         return result
 
-    def info(self) -> None:
-        print("Transformer")
-        print("===========")
-        print(f"Layers     : {self.num_layers}")
-        print(f"d_model    : {self.d_model}")
-        print(f"hidden_dim : {self.hidden_dim}")
-        print(f"causal     : {self.causal}")
-        print(f"final norm : {self.final_norm is not None}")
-        print(f"Parameters : {len(self.parameters())}")
-
 
 if __name__ == "__main__":
     x = Tensor([
-        [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
     ])
-    model = Transformer(2, 8, hidden_dim=32, runtime=x.runtime, seed=100)
-    print(model(x))
-    model.info()
+    model = Transformer(1, 4, hidden_dim=16, runtime=x.runtime, seed=100)
+    y = model(x)
+    dy = Tensor.ones(y.shape, runtime=x.runtime)
+    dx = model.backward(dy)
+    print("Y:", y)
+    print("dX:", dx)
