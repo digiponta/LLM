@@ -8,15 +8,12 @@
 #   loss.py
 #   optimizer.py
 #
-# Current status:
+# v0.2 status:
 #   - Forward pass works.
-#   - Cross entropy loss works.
-#   - Parameters can be collected.
-#   - Optimizer exists.
-#   - Full end-to-end autograd through LanguageModel is not connected yet.
-#
-# Therefore optimizer.step() is intentionally disabled until the model
-# forward path is converted to AutoTensor-compatible operations.
+#   - Cross entropy loss and analytic dL/dlogits work.
+#   - LM output projection (lm_head) is trainable.
+#   - Adam optimizer updates lm_head weights.
+#   - Transformer/Embedding remain frozen in this first functional v0.2 stage.
 #
 # v0.1 memory-management note:
 #   The virtual GPU uses a linear allocator. Temporary tensors created by a
@@ -97,7 +94,7 @@ def build_training_samples(
 
 
 class Trainer:
-    """Simple language-model trainer scaffold."""
+    """Language-model trainer. v0.2 trains the LM output projection."""
 
     def __init__(
         self,
@@ -106,8 +103,14 @@ class Trainer:
     ):
         self.model = model
         self.loss_fn = CrossEntropyLoss(reduction="mean")
+        # v0.2 first functional training stage:
+        # train only the output projection while keeping the Transformer
+        # backbone frozen. This proves real parameter updates and checkpoint
+        # round-tripping before full-model autograd is connected.
+        self.trainable_parameters = self.model.lm_head.parameters()
+
         self.optimizer = Adam(
-            self.model.parameters(),
+            self.trainable_parameters,
             learning_rate=learning_rate,
         )
 
@@ -160,27 +163,39 @@ class Trainer:
         input_ids: List[int],
         target_ids: List[int],
     ) -> float:
-        """
-        Execute one training-step scaffold.
+        """Execute one real v0.2 training step.
 
-        Backward and optimizer.step() are intentionally disabled until
-        LanguageModel forward operations participate in the autograd graph.
+        v0.2 computes the exact cross-entropy gradient with respect to logits
+        and backpropagates it through the final linear projection:
+
+            logits = hidden @ W
+            dW = hidden.T @ dlogits
+
+        The Transformer/Embedding backbone is intentionally frozen at this
+        stage. Adam then updates W for the LM output head.
         """
 
         self.optimizer.zero_grad()
 
         try:
-            logits = self.model(input_ids)
-            loss = self.loss_fn(logits, target_ids)
+            hidden = self.model.hidden_states(input_ids)
+            logits = self.model.lm_head(hidden)
 
-            # Future end-to-end autograd path:
-            # loss.backward()
-            # self.optimizer.step()
+            loss, grad_logits = self.loss_fn.forward_and_gradient(
+                logits,
+                target_ids,
+            )
+
+            grad_weight = hidden.T @ grad_logits
+            self.model.lm_head.weight.grad = grad_weight
+
+            self.optimizer.step()
 
             return loss
         finally:
-            # The current loss is a Python float, so all tensors allocated by
-            # this forward/loss calculation are temporary and can be discarded.
+            # Gradient/intermediate tensors are temporary after optimizer.step()
+            # because the updated parameter values live in persistent model
+            # storage below _temporary_memory_mark.
             self._release_temporary_gpu_memory()
 
     def train(
@@ -368,6 +383,6 @@ if __name__ == "__main__":
     print("Loss history:", history)
     print()
     print(
-        "NOTE: model forward operations are not yet connected to AutoTensor; "
-        "optimizer.step() is intentionally disabled."
+        "NOTE: v0.2 updates lm_head with analytic cross-entropy gradients; "
+        "the Transformer/Embedding backbone remains frozen."
     )
