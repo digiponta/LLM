@@ -5,9 +5,10 @@
 #   data/general-ja.txt
 #   data/data-nagato.txt
 #
-# Current v0.1 note:
-# train.py currently calculates loss, but backward() and
-# optimizer.step() are not connected yet.
+# v0.2:
+#   - Performs real optimization of the LM output projection.
+#   - Transformer/Embedding are frozen in this first functional stage.
+#   - Saves a checkpoint for infer.py.
 
 from pathlib import Path
 
@@ -21,6 +22,7 @@ GENERAL_FILE = "data/general-ja.txt"
 NAGATO_FILE = "data/data-nagato.txt"
 
 TOKENIZER_FILE = "model/tokenizer.json"
+MODEL_FILE = "model/model-v0.2.json"
 
 CONTEXT_LENGTH = 64
 
@@ -36,13 +38,15 @@ HIDDEN_DIM = 256
 # every step.
 GPU_MEMORY_SIZE = 8_000_000
 
-EPOCHS = 3
+# Keep the first real-learning run deliberately smaller than the v0.1
+# forward-only benchmark. Increase these after confirming that loss changes.
+EPOCHS = 1
 LEARNING_RATE = 1e-3
 
 # Full Wikipedia-derived corpora can produce millions of overlapping windows.
 # v0.1 is a Python virtual-GPU experiment, so cap the number of samples while
 # selecting them uniformly over the entire combined corpus.
-MAX_SAMPLES = 10_000
+MAX_SAMPLES = 1_000
 
 
 def load_text(filename):
@@ -62,7 +66,7 @@ def main():
 
     print()
     print("====================================")
-    print(" Homemade LLM Corpus Training")
+    print(" Homemade LLM Corpus Training v0.2")
     print("====================================")
     print()
 
@@ -219,12 +223,22 @@ def main():
     )
 
     print()
+    print("Saving model checkpoint...")
+
+    model.save(
+        MODEL_FILE
+    )
+
+    print(
+        "Model saved:",
+        MODEL_FILE,
+    )
+
+    print()
     print("NOTE:")
     print(
-        "Current v0.1 calculates loss, "
-        "but model parameters are not yet "
-        "updated because backward() and "
-        "optimizer.step() are disabled."
+        "v0.2 performs real Adam updates on lm_head. "
+        "Transformer/Embedding are frozen in this first functional stage."
     )
 
 
