@@ -10,17 +10,21 @@ from llm import LanguageModel
 
 
 TOKENIZER_FILE = "model/tokenizer.json"
-MODEL_FILE = "model/model-v0.2.json"
+MODEL_FILE = "model/model-v0.3.json"
 
 MAX_NEW_TOKENS = 100
 GPU_MEMORY_SIZE = 8_000_000
+
+TEMPERATURE = 0.8
+TOP_K = 40
+REPETITION_PENALTY = 1.15
 
 
 def main():
 
     print()
     print("====================================")
-    print(" Homemade LLM Interactive Inference v0.2")
+    print(" Homemade LLM Interactive Inference v0.3")
     print("====================================")
     print()
 
@@ -99,6 +103,9 @@ def main():
             max_new_tokens=MAX_NEW_TOKENS,
             eos_id=tokenizer.eos_id,
             show_progress=True,
+            temperature=TEMPERATURE,
+            top_k=TOP_K,
+            repetition_penalty=REPETITION_PENALTY,
         )
 
         generated_text = tokenizer.decode(
