@@ -1,9 +1,7 @@
 # layers.py
 #
 # Basic neural-network layers for the homemade LLM.
-#
-# Trainable state is stored as autograd.Parameter objects.
-# Forward computation still uses the underlying Tensor objects.
+# v0.3 adds manual backward propagation for full-model training.
 
 import math
 import random
@@ -13,10 +11,19 @@ from tensor import Tensor, TensorRuntime, get_default_runtime
 from autograd import Parameter
 
 
-class Layer:
-    """Base class for neural-network layers."""
+def _set_parameter_grad(parameter: Parameter, grad: Tensor) -> None:
+    if grad.shape != parameter.shape:
+        raise ValueError(
+            f"Gradient shape mismatch: {grad.shape} != {parameter.shape}"
+        )
+    parameter.grad = grad
 
+
+class Layer:
     def forward(self, x: Tensor) -> Tensor:
+        raise NotImplementedError
+
+    def backward(self, grad_output: Tensor) -> Tensor:
         raise NotImplementedError
 
     def __call__(self, x: Tensor) -> Tensor:
@@ -27,7 +34,7 @@ class Layer:
 
 
 class Linear(Layer):
-    """Fully connected linear layer: Y = X @ W + b."""
+    """Fully connected layer: Y = X @ W + b."""
 
     def __init__(
         self,
@@ -38,14 +45,13 @@ class Linear(Layer):
         seed: int = 0,
         init_scale: float = 0.02,
     ):
-        if in_features <= 0:
-            raise ValueError("in_features must be greater than 0.")
-        if out_features <= 0:
-            raise ValueError("out_features must be greater than 0.")
+        if in_features <= 0 or out_features <= 0:
+            raise ValueError("Linear dimensions must be greater than 0.")
 
         self.in_features = in_features
         self.out_features = out_features
         self.runtime = runtime or get_default_runtime()
+        self._last_input: Optional[Tensor] = None
 
         rng = random.Random(seed)
         weights = [
@@ -57,44 +63,60 @@ class Linear(Layer):
             Tensor(weights, runtime=self.runtime),
             name="weight",
         )
-
         self.bias = (
             Parameter(
                 Tensor.zeros((out_features,), runtime=self.runtime),
                 name="bias",
             )
-            if bias
-            else None
+            if bias else None
         )
 
     def forward(self, x: Tensor) -> Tensor:
         if x.runtime is not self.runtime:
             raise ValueError("Tensor runtime does not match Linear runtime.")
-        if len(x.shape) != 2:
-            raise ValueError("Linear currently expects a 2-D Tensor.")
-        if x.shape[1] != self.in_features:
+        if len(x.shape) != 2 or x.shape[1] != self.in_features:
             raise ValueError(
-                "Linear input dimension mismatch: "
-                f"expected {self.in_features}, got {x.shape[1]}"
+                f"Linear expects (*, {self.in_features}), got {x.shape}"
             )
 
+        self._last_input = x
         output = x @ self.weight.tensor
 
         if self.bias is not None:
             rows, cols = output.shape
+            bias_values = self.bias.tensor.flat()
             for row in range(rows):
-                for col in range(cols):
-                    output_address = output.address + row * cols + col
-                    value = self.runtime.memory.read_scalar(output_address)
-                    bias_value = self.runtime.memory.read_scalar(
-                        self.bias.address + col
-                    )
-                    self.runtime.memory.write_scalar(
-                        output_address,
-                        value + bias_value,
-                    )
+                base = output.address + row * cols
+                values = self.runtime.memory.read(base, cols)
+                self.runtime.memory.write(
+                    base,
+                    [values[col] + bias_values[col] for col in range(cols)],
+                )
 
         return output
+
+    def backward(self, grad_output: Tensor) -> Tensor:
+        if self._last_input is None:
+            raise RuntimeError("Linear.backward() called before forward().")
+        if grad_output.shape[1] != self.out_features:
+            raise ValueError("Linear backward output-gradient mismatch.")
+
+        x = self._last_input
+        grad_input = grad_output @ self.weight.tensor.T
+        grad_weight = x.T @ grad_output
+        _set_parameter_grad(self.weight, grad_weight)
+
+        if self.bias is not None:
+            rows, cols = grad_output.shape
+            values = [0.0] * cols
+            flat = grad_output.flat()
+            for row in range(rows):
+                for col in range(cols):
+                    values[col] += flat[row * cols + col]
+            grad_bias = Tensor(values, runtime=self.runtime)
+            _set_parameter_grad(self.bias, grad_bias)
+
+        return grad_input
 
     def parameters(self) -> List[Parameter]:
         result = [self.weight]
@@ -102,17 +124,13 @@ class Linear(Layer):
             result.append(self.bias)
         return result
 
-    def info(self) -> None:
-        print("Linear Layer")
-        print("============")
-        print(f"Input features  : {self.in_features}")
-        print(f"Output features : {self.out_features}")
-        print(f"Weight shape    : {self.weight.shape}")
-        print(f"Bias            : {self.bias is not None}")
-
 
 class ReLU(Layer):
+    def __init__(self):
+        self._last_input: Optional[Tensor] = None
+
     def forward(self, x: Tensor) -> Tensor:
+        self._last_input = x
         result = Tensor.zeros(x.shape, runtime=x.runtime)
         x.runtime.memory.write(
             result.address,
@@ -120,9 +138,27 @@ class ReLU(Layer):
         )
         return result
 
+    def backward(self, grad_output: Tensor) -> Tensor:
+        if self._last_input is None:
+            raise RuntimeError("ReLU.backward() called before forward().")
+        x_values = self._last_input.flat()
+        g_values = grad_output.flat()
+        values = [
+            g if x > 0.0 else 0.0
+            for x, g in zip(x_values, g_values)
+        ]
+        return Tensor(
+            _reshape(values, grad_output.shape),
+            runtime=grad_output.runtime,
+        )
+
 
 class GELU(Layer):
+    def __init__(self):
+        self._last_input: Optional[Tensor] = None
+
     def forward(self, x: Tensor) -> Tensor:
+        self._last_input = x
         result = Tensor.zeros(x.shape, runtime=x.runtime)
         coefficient = math.sqrt(2.0 / math.pi)
         output = []
@@ -131,6 +167,24 @@ class GELU(Layer):
             output.append(0.5 * value * (1.0 + math.tanh(inner)))
         x.runtime.memory.write(result.address, output)
         return result
+
+    def backward(self, grad_output: Tensor) -> Tensor:
+        if self._last_input is None:
+            raise RuntimeError("GELU.backward() called before forward().")
+
+        coefficient = math.sqrt(2.0 / math.pi)
+        result = []
+        for x, upstream in zip(self._last_input.flat(), grad_output.flat()):
+            inner = coefficient * (x + 0.044715 * x ** 3)
+            t = math.tanh(inner)
+            d_inner = coefficient * (1.0 + 3.0 * 0.044715 * x * x)
+            derivative = 0.5 * (1.0 + t) + 0.5 * x * (1.0 - t * t) * d_inner
+            result.append(upstream * derivative)
+
+        return Tensor(
+            _reshape(result, grad_output.shape),
+            runtime=grad_output.runtime,
+        )
 
 
 class LayerNorm(Layer):
@@ -142,8 +196,6 @@ class LayerNorm(Layer):
     ):
         if normalized_shape <= 0:
             raise ValueError("normalized_shape must be > 0.")
-        if eps <= 0:
-            raise ValueError("eps must be > 0.")
 
         self.normalized_shape = normalized_shape
         self.eps = eps
@@ -158,53 +210,106 @@ class LayerNorm(Layer):
             name="beta",
         )
 
+        self._last_xhat = None
+        self._last_inv_std = None
+        self._last_shape = None
+
     def forward(self, x: Tensor) -> Tensor:
         if x.runtime is not self.runtime:
             raise ValueError("Tensor runtime does not match LayerNorm runtime.")
-        if len(x.shape) == 0:
-            raise ValueError("LayerNorm requires at least one dimension.")
         if x.shape[-1] != self.normalized_shape:
-            raise ValueError(
-                "LayerNorm dimension mismatch: "
-                f"expected {self.normalized_shape}, got {x.shape[-1]}"
-            )
+            raise ValueError("LayerNorm dimension mismatch.")
 
         result = Tensor.zeros(x.shape, runtime=self.runtime)
         vector_size = self.normalized_shape
         vector_count = x.size // vector_size
 
+        xhat_rows = []
+        inv_stds = []
+        gamma = self.gamma.tensor.flat()
+        beta = self.beta.tensor.flat()
+
         for vector_index in range(vector_count):
             base = x.address + vector_index * vector_size
-            out_base = result.address + vector_index * vector_size
             values = self.runtime.memory.read(base, vector_size)
             mean = sum(values) / vector_size
             variance = sum((value - mean) ** 2 for value in values) / vector_size
             inv_std = 1.0 / math.sqrt(variance + self.eps)
+            xhat = [(value - mean) * inv_std for value in values]
 
-            for i in range(vector_size):
-                normalized = (values[i] - mean) * inv_std
-                gamma = self.runtime.memory.read_scalar(self.gamma.address + i)
-                beta = self.runtime.memory.read_scalar(self.beta.address + i)
-                self.runtime.memory.write_scalar(
-                    out_base + i,
-                    normalized * gamma + beta,
-                )
+            out = [
+                xhat[i] * gamma[i] + beta[i]
+                for i in range(vector_size)
+            ]
+            self.runtime.memory.write(
+                result.address + vector_index * vector_size,
+                out,
+            )
+            xhat_rows.append(xhat)
+            inv_stds.append(inv_std)
 
+        self._last_xhat = xhat_rows
+        self._last_inv_std = inv_stds
+        self._last_shape = x.shape
         return result
+
+    def backward(self, grad_output: Tensor) -> Tensor:
+        if self._last_xhat is None or self._last_inv_std is None:
+            raise RuntimeError("LayerNorm.backward() called before forward().")
+
+        n = self.normalized_shape
+        vector_count = grad_output.size // n
+        gamma = self.gamma.tensor.flat()
+        grad_flat = grad_output.flat()
+
+        grad_input_rows = []
+        grad_gamma = [0.0] * n
+        grad_beta = [0.0] * n
+
+        for row in range(vector_count):
+            dy = grad_flat[row * n:(row + 1) * n]
+            xhat = self._last_xhat[row]
+            inv_std = self._last_inv_std[row]
+
+            dxhat = [dy[i] * gamma[i] for i in range(n)]
+            sum_dxhat = sum(dxhat)
+            sum_dxhat_xhat = sum(dxhat[i] * xhat[i] for i in range(n))
+
+            dx = [
+                (inv_std / n)
+                * (n * dxhat[i] - sum_dxhat - xhat[i] * sum_dxhat_xhat)
+                for i in range(n)
+            ]
+            grad_input_rows.append(dx)
+
+            for i in range(n):
+                grad_gamma[i] += dy[i] * xhat[i]
+                grad_beta[i] += dy[i]
+
+        _set_parameter_grad(
+            self.gamma,
+            Tensor(grad_gamma, runtime=self.runtime),
+        )
+        _set_parameter_grad(
+            self.beta,
+            Tensor(grad_beta, runtime=self.runtime),
+        )
+
+        return Tensor(grad_input_rows, runtime=self.runtime)
 
     def parameters(self) -> List[Parameter]:
         return [self.gamma, self.beta]
 
 
 class Softmax(Layer):
+    def __init__(self):
+        self._last_output: Optional[Tensor] = None
+
     def forward(self, x: Tensor) -> Tensor:
         if len(x.shape) == 0:
             raise ValueError("Softmax requires a non-scalar Tensor.")
 
         last_dim = x.shape[-1]
-        if last_dim <= 0:
-            raise ValueError("Softmax dimension must be > 0.")
-
         result = Tensor.zeros(x.shape, runtime=x.runtime)
         vector_count = x.size // last_dim
 
@@ -215,11 +320,35 @@ class Softmax(Layer):
             max_value = max(values)
             exp_values = [math.exp(value - max_value) for value in values]
             total = sum(exp_values)
-            if total == 0.0:
-                raise ZeroDivisionError("Softmax normalization sum is zero.")
             x.runtime.memory.write(dst, [value / total for value in exp_values])
 
+        self._last_output = result
         return result
+
+    def backward(self, grad_output: Tensor) -> Tensor:
+        if self._last_output is None:
+            raise RuntimeError("Softmax.backward() called before forward().")
+
+        last_dim = self._last_output.shape[-1]
+        vector_count = self._last_output.size // last_dim
+        y = self._last_output.flat()
+        g = grad_output.flat()
+        result = []
+
+        for row in range(vector_count):
+            start = row * last_dim
+            yrow = y[start:start + last_dim]
+            grow = g[start:start + last_dim]
+            dot = sum(a * b for a, b in zip(grow, yrow))
+            result.extend([
+                yrow[i] * (grow[i] - dot)
+                for i in range(last_dim)
+            ])
+
+        return Tensor(
+            _reshape(result, self._last_output.shape),
+            runtime=grad_output.runtime,
+        )
 
 
 class Sequential(Layer):
@@ -231,6 +360,11 @@ class Sequential(Layer):
             x = layer(x)
         return x
 
+    def backward(self, grad_output: Tensor) -> Tensor:
+        for layer in reversed(self.layers):
+            grad_output = layer.backward(grad_output)
+        return grad_output
+
     def parameters(self) -> List[Parameter]:
         result = []
         for layer in self.layers:
@@ -239,9 +373,23 @@ class Sequential(Layer):
         return result
 
 
+def _reshape(values, shape):
+    if len(shape) == 1:
+        return list(values)
+    if len(shape) == 2:
+        rows, cols = shape
+        return [
+            list(values[row * cols:(row + 1) * cols])
+            for row in range(rows)
+        ]
+    raise ValueError("v0.3 helper currently supports 1-D/2-D tensors.")
+
+
 if __name__ == "__main__":
-    x = Tensor([[1.0, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]])
-    linear = Linear(4, 3, runtime=x.runtime, seed=42)
-    y = linear(x)
-    print("Linear output:", y)
-    print("Parameter count:", len(linear.parameters()))
+    x = Tensor([[1.0, 2.0], [3.0, 4.0]])
+    layer = Linear(2, 3, runtime=x.runtime, seed=42)
+    y = layer(x)
+    dy = Tensor.ones(y.shape, runtime=x.runtime)
+    dx = layer.backward(dy)
+    print("Y:", y)
+    print("dX:", dx)
