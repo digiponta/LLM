@@ -1,6 +1,6 @@
 # ffn.py
 #
-# Feed Forward Network for the homemade Transformer.
+# Feed Forward Network with v0.3 backward propagation.
 
 from typing import List, Optional
 
@@ -30,33 +30,26 @@ class FeedForward:
         self.runtime = runtime or get_default_runtime()
 
         self.fc1 = Linear(
-            d_model,
-            hidden_dim,
-            bias=bias,
-            runtime=self.runtime,
-            seed=seed + 1,
+            d_model, hidden_dim, bias=bias,
+            runtime=self.runtime, seed=seed + 1,
         )
         self.activation = GELU()
         self.fc2 = Linear(
-            hidden_dim,
-            d_model,
-            bias=bias,
-            runtime=self.runtime,
-            seed=seed + 2,
+            hidden_dim, d_model, bias=bias,
+            runtime=self.runtime, seed=seed + 2,
         )
 
     def forward(self, x: Tensor) -> Tensor:
         if x.runtime is not self.runtime:
             raise ValueError("Tensor runtime does not match FeedForward runtime.")
-        if len(x.shape) != 2:
-            raise ValueError("FeedForward currently expects a 2-D Tensor.")
-        if x.shape[1] != self.d_model:
-            raise ValueError(
-                f"FeedForward input dimension mismatch: expected {self.d_model}, "
-                f"got {x.shape[1]}"
-            )
-
+        if len(x.shape) != 2 or x.shape[1] != self.d_model:
+            raise ValueError("FeedForward input dimension mismatch.")
         return self.fc2(self.activation(self.fc1(x)))
+
+    def backward(self, grad_output: Tensor) -> Tensor:
+        grad = self.fc2.backward(grad_output)
+        grad = self.activation.backward(grad)
+        return self.fc1.backward(grad)
 
     def __call__(self, x: Tensor) -> Tensor:
         return self.forward(x)
@@ -64,20 +57,15 @@ class FeedForward:
     def parameters(self) -> List[Parameter]:
         return self.fc1.parameters() + self.fc2.parameters()
 
-    def info(self) -> None:
-        print("Feed Forward Network")
-        print("====================")
-        print(f"d_model    : {self.d_model}")
-        print(f"hidden_dim : {self.hidden_dim}")
-        print(f"Parameters : {len(self.parameters())}")
-
 
 if __name__ == "__main__":
     x = Tensor([
         [1.0, 0.0, 0.0, 0.0],
         [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
     ])
     ffn = FeedForward(4, hidden_dim=16, runtime=x.runtime, seed=42)
-    print(ffn(x))
-    ffn.info()
+    y = ffn(x)
+    dy = Tensor.ones(y.shape, runtime=x.runtime)
+    dx = ffn.backward(dy)
+    print("Y:", y)
+    print("dX:", dx)
