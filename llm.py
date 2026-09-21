@@ -124,11 +124,34 @@ class LanguageModel:
             raise ValueError("max_new_tokens must be >= 0.")
 
         generated = list(token_ids)
+
+        # Model parameters are already resident in virtual GPU memory.
+        # Every next-token forward pass allocates temporary tensors after
+        # this mark. Rewind those allocations after each generated token so
+        # autoregressive generation does not exhaust the linear allocator.
+        memory = self.runtime.memory
+        temporary_mark = memory.next_address
+
         for _ in range(max_new_tokens):
-            next_id = self.next_token(generated)
+            try:
+                next_id = self.next_token(generated)
+            finally:
+                temporary_addresses = [
+                    address
+                    for address in memory.allocations
+                    if address >= temporary_mark
+                ]
+
+                for address in temporary_addresses:
+                    del memory.allocations[address]
+
+                memory.next_address = temporary_mark
+
             generated.append(next_id)
+
             if eos_id is not None and next_id == eos_id:
                 break
+
         return generated
 
     def info(self) -> None:
