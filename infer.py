@@ -2,16 +2,15 @@
 #
 # Interactive inference for homemade LLM.
 
+from pathlib import Path
+
 from tokenizer import Tokenizer
 from tensor import TensorRuntime
 from llm import LanguageModel
 
 
 TOKENIZER_FILE = "model/tokenizer.json"
-
-D_MODEL = 64
-NUM_LAYERS = 2
-HIDDEN_DIM = 256
+MODEL_FILE = "model/model-v0.2.json"
 
 MAX_NEW_TOKENS = 100
 GPU_MEMORY_SIZE = 8_000_000
@@ -21,7 +20,7 @@ def main():
 
     print()
     print("====================================")
-    print(" Homemade LLM Interactive Inference")
+    print(" Homemade LLM Interactive Inference v0.2")
     print("====================================")
     print()
 
@@ -47,14 +46,29 @@ def main():
         "float elements",
     )
 
-    model = LanguageModel(
-        vocab_size=tokenizer.vocab_size,
-        d_model=D_MODEL,
-        num_layers=NUM_LAYERS,
-        hidden_dim=HIDDEN_DIM,
-        causal=True,
+    if not Path(MODEL_FILE).exists():
+        raise FileNotFoundError(
+            f"Model checkpoint not found: {MODEL_FILE}. "
+            "Run python train_corpus.py first."
+        )
+
+    print()
+    print("Loading trained model checkpoint...")
+
+    model = LanguageModel.load(
+        MODEL_FILE,
         runtime=runtime,
-        seed=42,
+    )
+
+    if model.vocab_size != tokenizer.vocab_size:
+        raise ValueError(
+            "Tokenizer/model vocabulary mismatch: "
+            f"{tokenizer.vocab_size} != {model.vocab_size}"
+        )
+
+    print(
+        "Model loaded:",
+        MODEL_FILE,
     )
 
     print()
